@@ -27,6 +27,7 @@ import {
   MIN_QUICK_CREATE_CLI_VERSION,
 } from "@multica/core/runtimes";
 import { useFileUpload } from "@multica/core/hooks/use-file-upload";
+import { formatShortcut, modKey, enterKey } from "@multica/core/platform";
 import type { Agent } from "@multica/core/types";
 import { ActorAvatar } from "../common/actor-avatar";
 import { canAssignAgent } from "../issues/components/pickers/assignee-picker";
@@ -115,7 +116,10 @@ export function AgentCreatePanel({
   // daemons handle attachments and partial-failure retries incorrectly
   // (see PR #1851 / MUL-1496). Pre-check on the picker so the user gets
   // immediate feedback instead of waiting for the inbox failure; the
-  // server re-validates as the trust boundary.
+  // server re-validates as the trust boundary. Dev-built daemons
+  // (git-describe shape) are exempted inside checkQuickCreateCliVersion
+  // — frontend and server share the same signal there, so they agree by
+  // construction across web/desktop/staging without comparing env flags.
   const { data: runtimes = [] } = useQuery(runtimeListOptions(wsId));
   const selectedRuntime = useMemo(
     () =>
@@ -406,7 +410,7 @@ export function AgentCreatePanel({
             >
               {submitting ? "Sending…" : uploading ? "Uploading…" : justSent ? (
                 <span className="flex items-center gap-1"><Check className="size-3.5" />Sent</span>
-              ) : "Create (⌘↵)"}
+              ) : `Create (${formatShortcut(modKey, enterKey)})`}
             </Button>
           </div>
         </div>
