@@ -6,10 +6,12 @@ import { AppLink } from "../../navigation";
 import { useNavigation } from "../../navigation";
 import {
   Archive,
+  ArrowDownToLine,
   Calendar,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   CircleCheck,
   MoreHorizontal,
   PanelRight,
@@ -629,6 +631,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                 <ChevronRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
               </>
             )}
+            <span className="text-muted-foreground tabular-nums shrink-0">
+              {issue.identifier}
+            </span>
             <span className="truncate font-medium text-foreground">
               {issue.title}
             </span>
@@ -990,18 +995,18 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             ) : (
             <>
             {hasMoreOlder && (
-              <div className="my-4 flex items-center gap-3">
-                <div className="h-px flex-1 bg-border" />
-                <button
+              <div className="my-4 flex justify-center">
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={fetchOlder}
                   disabled={isFetchingOlder}
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
                 >
+                  <ChevronUp />
                   {isFetchingOlder
                     ? t(($) => $.timeline.loading)
                     : t(($) => $.timeline.show_older)}
-                </button>
-                <div className="h-px flex-1 bg-border" />
+                </Button>
               </div>
             )}
             <div className="mt-4 flex flex-col gap-3">
@@ -1053,6 +1058,16 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                           <div className="flex min-w-0 flex-1 items-center gap-1">
                             <span className="shrink-0 font-medium">{getActorName(entry.actor_type, entry.actor_id)}</span>
                             <span className="truncate">{formatActivity(entry, t, getActorName)}</span>
+                            {/* Coalesce badge for non-task actions: task_completed / task_failed already
+                                bake the count into their translation, so suppress the badge there to
+                                avoid showing "×N" twice. */}
+                            {(entry.coalesced_count ?? 1) > 1 &&
+                              entry.action !== "task_completed" &&
+                              entry.action !== "task_failed" && (
+                                <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs font-medium tabular-nums text-muted-foreground">
+                                  {t(($) => $.activity.coalesced_badge, { count: entry.coalesced_count ?? 1 })}
+                                </span>
+                              )}
                             <Tooltip>
                               <TooltipTrigger
                                 render={
@@ -1074,29 +1089,33 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               })}
             </div>
             {(hasMoreNewer || !isAtLatest) && (
-              <div className="mt-4 flex items-center justify-center gap-4">
+              <div className="mt-4 flex items-center justify-center gap-2">
                 {hasMoreNewer && (
-                  <button
+                  <Button
+                    variant="outline"
+                    size="sm"
                     onClick={fetchNewer}
                     disabled={isFetchingNewer}
-                    className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
                   >
+                    <ChevronDown />
                     {isFetchingNewer
                       ? t(($) => $.timeline.loading)
                       : t(($) => $.timeline.show_newer)}
-                  </button>
+                  </Button>
                 )}
                 {!isAtLatest && (
-                  <button
+                  <Button
+                    variant="default"
+                    size="sm"
                     onClick={jumpToLatest}
-                    className="text-xs font-medium text-foreground hover:text-foreground/80 transition-colors"
                   >
+                    <ArrowDownToLine />
                     {newEntriesBelowCount > 0
                       ? t(($) => $.timeline.jump_to_latest_with_count, {
                           count: newEntriesBelowCount,
                         })
                       : t(($) => $.timeline.jump_to_latest)}
-                  </button>
+                  </Button>
                 )}
               </div>
             )}
