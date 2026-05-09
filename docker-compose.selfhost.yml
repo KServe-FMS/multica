@@ -35,6 +35,7 @@ services:
         condition: service_healthy
     ports:
       - "${PORT:-8080}:8080"
+      - "${METRICS_PORT:-9090}:9090"
     volumes:
       - backend_uploads:/app/data/uploads
     environment:
