@@ -298,6 +298,15 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			OwnerID:     ownerID,
 		})
 		if err != nil {
+			h.Analytics.Capture(analytics.RuntimeFailed(
+				uuidToString(ownerID),
+				req.WorkspaceID,
+				req.DaemonID,
+				provider,
+				"registration_failed",
+				"db_error",
+				true,
+			))
 			writeError(w, http.StatusInternalServerError, "failed to register runtime: "+err.Error())
 			return
 		}
@@ -319,15 +328,28 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			LegacyDaemonID: row.LegacyDaemonID,
 		}
 
+		// Inserted is false for normal daemon reconnects/upserts, so
+		// runtime_ready is a first-ready-per-runtime-row signal.
 		if row.Inserted {
 			h.Analytics.Capture(analytics.RuntimeRegistered(
 				uuidToString(ownerID),
 				req.WorkspaceID,
 				uuidToString(registered.ID),
+				req.DaemonID,
 				provider,
 				runtime.Version,
 				req.CLIVersion,
 			))
+			if registered.Status == "online" {
+				h.Analytics.Capture(analytics.RuntimeReady(
+					uuidToString(ownerID),
+					req.WorkspaceID,
+					uuidToString(registered.ID),
+					req.DaemonID,
+					provider,
+					0,
+				))
+			}
 		}
 
 		// Seamless migration from the previous hostname-derived identity. The
@@ -500,6 +522,13 @@ func (h *Handler) DaemonDeregister(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("deregister: failed to set offline", "runtime_id", rid, "error", err)
 			continue
 		}
+		h.Analytics.Capture(analytics.RuntimeOffline(
+			uuidToString(rt.OwnerID),
+			wsID,
+			uuidToString(rt.ID),
+			rt.DaemonID.String,
+			rt.Provider,
+		))
 
 		affectedWorkspaces[wsID] = true
 	}
@@ -1379,6 +1408,7 @@ func (h *Handler) emitIssueExecutedOnFirstCompletion(r *http.Request, task *db.A
 	if task.StartedAt.Valid && task.CompletedAt.Valid {
 		durationMS = task.CompletedAt.Time.Sub(task.StartedAt.Time).Milliseconds()
 	}
+	taskContext := h.TaskService.AnalyticsContextForTask(r.Context(), *task)
 	// distinct_id prefers the human creator so agent-driven events flow into
 	// the issue-author's person profile (same place signup and
 	// workspace_created land). Agent-created issues keep the agent id with a
@@ -1391,6 +1421,11 @@ func (h *Handler) emitIssueExecutedOnFirstCompletion(r *http.Request, task *db.A
 		distinct,
 		uuidToString(marked.WorkspaceID),
 		uuidToString(marked.ID),
+		uuidToString(task.ID),
+		uuidToString(task.AgentID),
+		taskContext.Source,
+		taskContext.RuntimeMode,
+		taskContext.Provider,
 		durationMS,
 	))
 }
@@ -1807,5 +1842,82 @@ func (h *Handler) GetIssueGCCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":     issue.Status,
 		"updated_at": issue.UpdatedAt.Time,
+	})
+}
+
+// GetChatSessionGCCheck returns the status and updated_at of a chat session
+// for the daemon GC loop. A 404 here means the session was hard-deleted
+// (DeleteChatSession in chat.go runs a real DELETE), which the daemon treats
+// as an immediate-clean signal — the user's explicit delete is the strongest
+// reclaim authorization we can get.
+//
+// Same anti-enumeration shape as GetIssueGCCheck: workspace mismatch returns
+// the same 404 so a scoped daemon token can't probe other workspaces.
+func (h *Handler) GetChatSessionGCCheck(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionId")
+	sessionUUID, ok := parseUUIDOrBadRequest(w, sessionID, "session_id")
+	if !ok {
+		return
+	}
+	session, err := h.Queries.GetChatSession(r.Context(), sessionUUID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(session.WorkspaceID)) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":     session.Status,
+		"updated_at": session.UpdatedAt.Time,
+	})
+}
+
+// GetAutopilotRunGCCheck returns the status and completed_at of an autopilot
+// run for the daemon GC loop. autopilot_run has no updated_at column; the
+// daemon uses completed_at as the TTL anchor for terminal runs, and treats
+// non-terminal status as a skip signal regardless of timestamp.
+//
+// Workspace ownership is resolved via the parent autopilot row.
+func (h *Handler) GetAutopilotRunGCCheck(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	runUUID, ok := parseUUIDOrBadRequest(w, runID, "run_id")
+	if !ok {
+		return
+	}
+	run, err := h.Queries.GetAutopilotRun(r.Context(), runUUID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "autopilot run not found")
+		return
+	}
+	autopilot, err := h.Queries.GetAutopilot(r.Context(), run.AutopilotID)
+	if err != nil {
+		// Parent autopilot is gone — treat as not found rather than 500
+		// so the daemon can fall through to its orphan-by-mtime path.
+		writeError(w, http.StatusNotFound, "autopilot run not found")
+		return
+	}
+	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(autopilot.WorkspaceID)) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       run.Status,
+		"completed_at": run.CompletedAt.Time,
+	})
+}
+
+// GetTaskGCCheck returns the agent_task_queue status for quick-create cleanup.
+// Quick-create tasks have no parent record (no issue_id at WriteGCMeta time,
+// no chat session, no autopilot run) so the daemon keys GC directly on the
+// task row itself.
+func (h *Handler) GetTaskGCCheck(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskId")
+	task, ok := h.requireDaemonTaskAccess(w, r, taskID)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       task.Status,
+		"completed_at": task.CompletedAt.Time,
 	})
 }
