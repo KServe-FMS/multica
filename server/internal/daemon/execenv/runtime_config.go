@@ -56,19 +56,19 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 // For Cursor:   writes {workDir}/AGENTS.md  (skills discovered natively from .cursor/skills/)
 // For Kimi:     writes {workDir}/AGENTS.md  (Kimi Code CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
 // For Kiro:     writes {workDir}/AGENTS.md  (Kiro CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
-func InjectRuntimeConfig(workDir, provider string, ctx TaskContextForEnv) error {
+func InjectRuntimeConfig(workDir, provider string, ctx TaskContextForEnv) (string, error) {
 	content := buildMetaSkillContent(provider, ctx)
 
 	switch provider {
 	case "claude":
-		return os.WriteFile(filepath.Join(workDir, "CLAUDE.md"), []byte(content), 0o644)
+		return content, os.WriteFile(filepath.Join(workDir, "CLAUDE.md"), []byte(content), 0o644)
 	case "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro":
-		return os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte(content), 0o644)
+		return content, os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte(content), 0o644)
 	case "gemini":
-		return os.WriteFile(filepath.Join(workDir, "GEMINI.md"), []byte(content), 0o644)
+		return content, os.WriteFile(filepath.Join(workDir, "GEMINI.md"), []byte(content), 0o644)
 	default:
 		// Unknown provider — skip config injection, prompt-only mode.
-		return nil
+		return content, nil
 	}
 }
 
@@ -106,7 +106,7 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	b.WriteString("### Read\n")
 	b.WriteString("- `multica issue get <id> --output json` — Get full issue details (title, description, status, priority, assignee)\n")
 	b.WriteString("- `multica issue list [--status X] [--priority X] [--assignee X | --assignee-id <uuid>] [--limit N] [--offset N] [--full-id] [--output json]` — List issues in workspace (default limit: 50; table output uses routable issue keys; JSON output includes `total`, `has_more` — use offset to paginate when `has_more` is true). Prefer `--assignee-id <uuid>` when scripting from `multica workspace members --output json` / `multica agent list --output json`.\n")
-	b.WriteString("- `multica issue comment list <issue-id> [--limit N] [--offset N] [--since <RFC3339>] --output json` — List comments on an issue (supports pagination; includes id, parent_id for threading)\n")
+	b.WriteString("- `multica issue comment list <issue-id> [--since <RFC3339>] --output json` — List all comments on an issue (server caps at 2000 rows). Use `--since` for incremental polling.\n")
 	b.WriteString("- `multica issue label list <issue-id> --output json` — List labels currently attached to an issue\n")
 	b.WriteString("- `multica issue subscriber list <issue-id> --output json` — List members/agents subscribed to an issue\n")
 	b.WriteString("- `multica label list --output json` — List all labels defined in the workspace (returns id + name + color)\n")
@@ -146,8 +146,8 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	b.WriteString("  - The same rule applies to `--description` on `multica issue create` and `multica issue update` — use `--description-stdin` and pipe a HEREDOC for any multi-line description; the inline `--description \"...\"` form is for short single-line text only.\n")
 	b.WriteString("- `multica issue comment delete <comment-id>` — Delete a comment\n")
 	b.WriteString("- `multica label create --name \"...\" --color \"#hex\"` — Define a new workspace label (use this only when the label you need does not exist yet; reuse existing labels via `multica label list` first)\n")
-	b.WriteString("- `multica autopilot create --title \"...\" --agent <name> --mode create_issue [--description \"...\"]` — Create an autopilot\n")
-	b.WriteString("- `multica autopilot update <id> [--title X] [--description X] [--status active|paused]` — Update an autopilot\n")
+	b.WriteString("- `multica autopilot create --title \"...\" --agent <name> --mode create_issue|run_only [--description \"...\"]` — Create an autopilot\n")
+	b.WriteString("- `multica autopilot update <id> [--title X] [--description X] [--status active|paused] [--mode create_issue|run_only]` — Update an autopilot\n")
 	b.WriteString("- `multica autopilot trigger <id>` — Manually trigger an autopilot to run once\n")
 	b.WriteString("- `multica autopilot delete <id>` — Delete an autopilot\n\n")
 
@@ -246,8 +246,8 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		// Comment-triggered: focus on reading and replying
 		b.WriteString("**This task was triggered by a NEW comment.** Your primary job is to respond to THIS specific comment, even if you have handled similar requests before in this session.\n\n")
 		fmt.Fprintf(&b, "1. Run `multica issue get %s --output json` to understand the issue context\n", ctx.IssueID)
-		fmt.Fprintf(&b, "2. Run `multica issue comment list %s --output json` to read the conversation\n", ctx.IssueID)
-		b.WriteString("   - If the output is very large or truncated, use pagination: `--limit 30` to get the latest 30 comments, or `--since <timestamp>` to fetch only recent ones\n")
+		fmt.Fprintf(&b, "2. Run `multica issue comment list %s --output json` to read the conversation (returns all comments, capped server-side at 2000)\n", ctx.IssueID)
+		b.WriteString("   - For incremental polling, use `--since <RFC3339-timestamp>` to fetch only comments newer than a known cursor\n")
 		fmt.Fprintf(&b, "3. Find the triggering comment (ID: `%s`) and understand what is being asked — do NOT confuse it with previous comments\n", ctx.TriggerCommentID)
 		b.WriteString("4. **Decide whether a reply is warranted.** If you produced actual work this turn (investigated, fixed, answered a real question), post the result via step 6 — that is a normal reply, not a noise comment. If the triggering comment was a pure acknowledgment / thanks / sign-off from another agent AND you produced no work this turn, do NOT post a reply — and do NOT post a comment saying 'No reply needed' or similar. Simply exit with no output. Silence is a valid and preferred way to end agent-to-agent conversations.\n")
 		b.WriteString("5. If a reply IS warranted: do any requested work first, then **decide whether to include any `@mention` link.** The default is NO mention. Only mention when you are escalating to a human owner who is not yet involved, delegating a concrete new sub-task to another agent for the first time, or the user explicitly asked you to loop someone in. Never @mention the agent you are replying to as a thank-you or sign-off.\n")
@@ -258,8 +258,7 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		// Assignment-triggered: defer to agent Skills for workflow specifics.
 		b.WriteString("You are responsible for managing the issue status throughout your work.\n\n")
 		fmt.Fprintf(&b, "1. Run `multica issue get %s --output json` to understand your task\n", ctx.IssueID)
-		fmt.Fprintf(&b, "2. Run `multica issue comment list %s --output json` to read the full comment history — this is mandatory, not optional. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions.\n", ctx.IssueID)
-		fmt.Fprintf(&b, "   - If the output is very large or truncated, use pagination: `--limit 30` to get the latest 30 comments, or `--since <timestamp>` to fetch only recent ones\n")
+		fmt.Fprintf(&b, "2. Run `multica issue comment list %s --output json` to read the full comment history (returns all comments, capped server-side at 2000) — this is mandatory, not optional. Earlier comments often carry context the issue body lacks (e.g. which repo to work in, the prior agent's findings, the reason the issue was reassigned to you). Skipping this step is the most common cause of agents acting on stale or incomplete instructions.\n", ctx.IssueID)
 		fmt.Fprintf(&b, "3. Run `multica issue status %s in_progress`\n", ctx.IssueID)
 		b.WriteString("4. Follow your Skills and Agent Identity to complete the task (write code, investigate, etc.)\n")
 		fmt.Fprintf(&b, "5. **Post your final results as a comment — this step is mandatory**: `multica issue comment add %s --content \"...\"`. Your results are only visible to the user if posted via this CLI call; text in your terminal or run logs is NOT delivered.\n", ctx.IssueID)
