@@ -88,8 +88,10 @@ import { createRequestId } from "../utils";
 import { getCurrentSlug } from "../platform/workspace-storage";
 import { parseWithFallback } from "./schema";
 import {
+  AttachmentResponseSchema,
   ChildIssuesResponseSchema,
   CommentsListSchema,
+  EMPTY_ATTACHMENT,
   EMPTY_LIST_ISSUES_RESPONSE,
   EMPTY_TIMELINE_ENTRIES,
   ListIssuesResponseSchema,
@@ -657,6 +659,16 @@ export class ApiClient {
     await this.fetch(`/api/runtimes/${runtimeId}`, { method: "DELETE" });
   }
 
+  async updateRuntime(
+    runtimeId: string,
+    patch: { timezone?: string; visibility?: "private" | "public" },
+  ): Promise<AgentRuntime> {
+    return this.fetch(`/api/runtimes/${runtimeId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  }
+
   async getRuntimeUsage(runtimeId: string, params?: { days?: number }): Promise<RuntimeUsage[]> {
     const search = new URLSearchParams();
     if (params?.days) search.set("days", String(params.days));
@@ -1009,11 +1021,15 @@ export class ApiClient {
   }
 
   // File Upload & Attachments
-  async uploadFile(file: File, opts?: { issueId?: string; commentId?: string }): Promise<Attachment> {
+  async uploadFile(
+    file: File,
+    opts?: { issueId?: string; commentId?: string; chatSessionId?: string },
+  ): Promise<Attachment> {
     const formData = new FormData();
     formData.append("file", file);
     if (opts?.issueId) formData.append("issue_id", opts.issueId);
     if (opts?.commentId) formData.append("comment_id", opts.commentId);
+    if (opts?.chatSessionId) formData.append("chat_session_id", opts.chatSessionId);
 
     const rid = createRequestId();
     const start = Date.now();
@@ -1034,7 +1050,10 @@ export class ApiClient {
     }
 
     this.logger.info(`← ${res.status} /api/upload-file`, { rid, duration: `${Date.now() - start}ms` });
-    return res.json() as Promise<Attachment>;
+    const raw = (await res.json()) as unknown;
+    return parseWithFallback(raw, AttachmentResponseSchema, EMPTY_ATTACHMENT, {
+      endpoint: "POST /api/upload-file",
+    });
   }
 
   // Chat Sessions
@@ -1062,10 +1081,18 @@ export class ApiClient {
     return this.fetch(`/api/chat/sessions/${sessionId}/messages`);
   }
 
-  async sendChatMessage(sessionId: string, content: string): Promise<SendChatMessageResponse> {
+  async sendChatMessage(
+    sessionId: string,
+    content: string,
+    attachmentIds?: string[],
+  ): Promise<SendChatMessageResponse> {
+    const body: { content: string; attachment_ids?: string[] } = { content };
+    if (attachmentIds && attachmentIds.length > 0) {
+      body.attachment_ids = attachmentIds;
+    }
     return this.fetch(`/api/chat/sessions/${sessionId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify(body),
     });
   }
 
@@ -1087,6 +1114,17 @@ export class ApiClient {
 
   async listAttachments(issueId: string): Promise<Attachment[]> {
     return this.fetch(`/api/issues/${issueId}/attachments`);
+  }
+
+  // Fetches a fresh attachment metadata record. The server re-signs
+  // `download_url` on every call (30 min expiry), so the click-time
+  // download flow uses this endpoint to avoid handing the user a stale
+  // signed URL cached in TanStack Query.
+  async getAttachment(id: string): Promise<Attachment> {
+    const raw = await this.fetch<unknown>(`/api/attachments/${id}`);
+    return parseWithFallback(raw, AttachmentResponseSchema, EMPTY_ATTACHMENT, {
+      endpoint: "GET /api/attachments/{id}",
+    });
   }
 
   async deleteAttachment(id: string): Promise<void> {
